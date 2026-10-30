@@ -1,0 +1,8 @@
+numpy
+opencv-python-headless
+potracer
+pymupdf
+reportlab
+fonttools
+pillow
+shapely
