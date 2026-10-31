@@ -9,7 +9,9 @@ original PNG.
 Coordinates are pixels of the original image (origin top-left, y down) and are
 scaled so one card is 85.6 mm wide, the same scale as the non-editable file.
 
-usage: python build_editable.py original.png out.ai
+usage: python build_editable.py original.png out.ai [--outline]
+  --outline  convert all text to outlines (filled vector shapes), like
+             Illustrator's Type > Create Outlines. No fonts are needed.
 """
 import os
 import sys
@@ -17,6 +19,7 @@ import sys
 import cv2
 import numpy as np
 import potrace
+from fontTools.pens.basePen import BasePen
 from fontTools.ttLib import TTFont as FTFont
 from reportlab.lib.colors import Color, HexColor
 from reportlab.pdfbase import pdfmetrics
@@ -466,7 +469,53 @@ def draw_text(c, runs, x, y, size, colour, hscale=1.0, space=0.0):
     c.restoreState()
 
 
-def build(src, out):
+class _PathPen(BasePen):
+    """Draws a font glyph into a ReportLab path, mapping points through tf."""
+
+    def __init__(self, glyphset, path, tf):
+        super().__init__(glyphset)
+        self.path, self.tf = path, tf
+
+    def _moveTo(self, pt):
+        self.path.moveTo(*self.tf(pt))
+
+    def _lineTo(self, pt):
+        self.path.lineTo(*self.tf(pt))
+
+    def _curveToOne(self, a, b, pt):
+        self.path.curveTo(*self.tf(a), *self.tf(b), *self.tf(pt))
+
+    def _closePath(self):
+        self.path.close()
+
+    def _endPath(self):
+        pass
+
+
+def draw_text_outlined(c, runs, x, y, size, colour, hscale=1.0, space=0.0):
+    """Same placement as draw_text (PDF text rules: no kerning, character
+    spacing added after each glyph and scaled with the horizontal scale),
+    but each glyph is a filled vector shape."""
+    c.saveState()
+    c.translate(x, y)
+    c.scale(1, -1)
+    p = c.beginPath()
+    pen_x = 0.0
+    for text, font, rel, rise in runs:
+        ft = FT[font]
+        gs, cmap, upm = ft.getGlyphSet(), ft.getBestCmap(), ft["head"].unitsPerEm
+        k, r = size * rel / upm, size * rise
+        for ch in text:
+            g = cmap[ord(ch)]
+            tf = lambda pt, ox=pen_x: (hscale * (ox + pt[0] * k), pt[1] * k + r)
+            gs[g].draw(_PathPen(gs, p, tf))
+            pen_x += ft["hmtx"][g][0] * k + space
+    c.setFillColor(colour)
+    c.drawPath(p, fill=1, stroke=0, fillMode=1)     # TrueType glyphs use non-zero fill
+    c.restoreState()
+
+
+def build(src, out, outline=False):
     img = cv2.imread(src)
     H, W = img.shape[:2]
     lum = lum_of(img)
@@ -568,9 +617,12 @@ def build(src, out):
 
     # 6. write the file
     c = rl_canvas.Canvas(out, pagesize=(W * PT_PER_PX, H * PT_PER_PX), initialFontName="SourceSans3-Medium")
-    c.setTitle("Bubble Blush Loyal-Tea Card (editable)")
+    c.setTitle("Bubble Blush Loyal-Tea Card (text outlined)" if outline
+               else "Bubble Blush Loyal-Tea Card (editable)")
     c.setAuthor("Bubble Blush")
-    c.setCreator("Vector trace of the original artwork with live text")
+    c.setCreator("Vector trace of the original artwork, text converted to outlines" if outline
+                 else "Vector trace of the original artwork with live text")
+    text_fn = draw_text_outlined if outline else draw_text
     c.translate(0, H * PT_PER_PX)
     c.scale(PT_PER_PX, -PT_PER_PX)
     c.setLineJoin(1)
@@ -626,14 +678,14 @@ def build(src, out):
     c.setLineWidth(rw)
     c.line(rx0, ry, rx1, ry)
 
-    # live text
+    # text (live, or outlined)
     for t in placed:
-        draw_text(c, t["runs"], t["x"], t["y"], t["size"], t["colour"], t["hs"], t["sp"])
+        text_fn(c, t["runs"], t["x"], t["y"], t["size"], t["colour"], t["hs"], t["sp"])
     for ch, x, b, ang, ox, hs in heading:
         c.saveState()
         c.translate(x, b)
         c.rotate(ang)
-        draw_text(c, [(ch, font, 1, 0)], ox, 0, hsize, hcolour, hs)
+        text_fn(c, [(ch, font, 1, 0)], ox, 0, hsize, hcolour, hs)
         c.restoreState()
     c.setFillColor(bullet_colour)
     for x, y in BULLETS:
@@ -647,9 +699,10 @@ def build(src, out):
 
 
 if __name__ == "__main__":
-    placed = build(sys.argv[1], sys.argv[2])
+    args = [a for a in sys.argv[1:] if a != "--outline"]
+    placed = build(args[0], args[1], outline="--outline" in sys.argv)
     for t in placed:
         print(f"{t['id']:12s} size {t['size']:5.1f}px  hscale {t['hs'] * 100:5.1f}%  "
               f"spacing {t['sp']:4.1f}  shift {t['shift'][0]:+.2f},{t['shift'][1]:+.2f}  "
               f"overlap {t['match']:.3f}")
-    print("wrote", sys.argv[2])
+    print("wrote", args[1])
